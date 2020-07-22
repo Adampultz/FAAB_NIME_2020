@@ -1,0 +1,45 @@
+
+s = Server.default;
+
+s.options.numAnalogInChannels = 8;
+s.options.memSize_(8192*16);
+s.options.maxLogins = 4;
+s.options.headphoneLevel = -6; // sets the headphone level to -6 dB
+s.options.speakerMuted = 0;    // enable the speaker amp
+s.options.numMultiplexChannels = 0; // do not enable multiplexer channels
+s.options.blockSize = 32;
+s.options.numInputBusChannels = 4;
+s.options.numOutputBusChannels = 2;
+
+s.options.postln;
+
+~numIns = 4;
+~anIns = [4,7,5,6];
+~stringAmps = [3,2,1,1];
+
+s.waitForBoot {
+	"Server Booted".postln;
+	(
+	SynthDef(\strings,
+			{ |rmsLP = 4, filFrq =0.1, lim = 3.0, oscMax =0.15, ampSc =4, ampDiffScale =1, dcScale = 1,  cD=0.2, cDecay= 0.2|
+		var sr = SampleRate.ir;
+				var anIn = A2K.kr(AnalogIn.ar(~anIns));
+				var anScale = LinLin.kr(anIn.round(0.001), 0, 0.827, -60.0, 0.0).dbamp; // Scaled to dB and then linear amplitude
+				var pickIn= SoundIn.ar([0,1,2,3]) * anScale * ~stringAmps * 10;
+			var sInKr = A2K.kr(pickIn);
+				var freqZero = ZeroCrossing.kr(sInKr).clip(30, 4000); // Zero crossings (for crude low-CPU individual pitch estimation)
+			var ab = RMS.kr(Mix(pickIn * ampSc), 0.2); // Slow RMS amplitude follower, sum of all inputs
+			var rmsQuick = RMS.kr(Mix(pickIn * ampSc), 10); // Fast RMS amplitude follower
+				var ampDiff = RMS.kr((ab - rmsQuick), 4).abs; // Absolute difference between slow and fast amplitude RMS
+				var comb = LPF.ar(4.collect({ |i|Mix(CombC.ar(pickIn[i], 0.2, (RMS.kr(freqZero[i], 0.1) * [7/4, 9/8, 11/8, 13/8]).reciprocal,ampDiff.sqrt.linlin(0.0, 1, 0.5, -0.5)))} * 0.25), 4000);
+				var out = LPF.ar(XFade2.ar(Mix(pickIn), Mix(comb), AnalogIn.ar(2).round(0.001).linlin(0.0, 0.827, -1.0,1.0)), 6000);
+				Out.ar(0, Limiter.ar(LeakDC.ar(out)),lim);
+
+		}).send(s)
+	);
+
+
+	s.sync;
+
+	x = Synth(\strings, target:s)
+};
