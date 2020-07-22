@@ -4,7 +4,6 @@ s = Server.default;
 s.options.numAnalogInChannels = 8;
 s.options.memSize_(8192*16);
 s.options.maxLogins = 4;
-s.options.headphoneLevel = -6; // sets the headphone level to -6 dB
 s.options.speakerMuted = 0;    // enable the speaker amp
 s.options.numMultiplexChannels = 0; // do not enable multiplexer channels
 s.options.blockSize = 32;
@@ -14,9 +13,8 @@ s.options.numOutputBusChannels = 2;
 s.options.postln;
 
 ~numIns = 4;
-~anIns = [4,7,5,6];
-~stringAmps = [4,2,1,1];
-// ~stringAmps = [1];
+~anIns = [4,7,5,6]; // To adjust for faulty wiring between sliders and the Bela
+~stringAmps = [3,2,1,1]; // To adjust for the ease with which different strings feed back. Will be instrument- and tuning-dependent
 ~syncAmps = Bus.control(s,4); // Amp for scaling incoming amplitudes
 ~syncFreq = Bus.control(s,4); // Frequency control for oscillators
 ~variance = Bus.control(s,1).set(0.0001); // Set initial variance for sync
@@ -39,24 +37,23 @@ d.add(\counter -> [0]);
 d.add(\variance -> 0);
 d.add(\fitnessLS -> Array.fill(8,{rand(1.0)}).normalizeSum);
 
-
 o = OSCFunc({|msg|
 var mean = msg[3..6].mean; // Amplitude mean of strings
-var variance = (4.collect({|i| ((msg[i+3]) - (mean)).pow(2)}).sum/4); // Variance
-d[\mainAmp].put(0, d[\mainAmp][0] + mean); // Accumulate mean amplitude of all strings
-d[\varSum].put(0, d[\varSum][0] + variance); // Accumulate 
+var variance = (4.collect({|i| ((msg[i+3]) - (mean)).pow(2)}).sum/4); // Variance of string amplitude
+d[\mainAmp].put(0, d[\mainAmp][0] + mean); // Accumulate mean amplitude of all strings over each generation
+d[\varSum].put(0, d[\varSum][0] + variance); // Accumulate variance over each generation
 
 4.collect({|i| d[(\amp_ ++ i).asSymbol].put(0,d[(\amp_ ++ i).asSymbol][0]+ msg[3+i])}); // Running sync to sum of amplitudes
 	d[\counter].put(0, msg[9].asInt);
-		if(msg[7] < 0.9,
+		if(msg[7] < 0.9, // If phasor exceeds 0.9
 		{~trig.set(0);
 		~phasorGate.set(1); // Keep phasor gate open
 			~countReset.set(0)},
 		{
 		~phasorGate.set(-1); // Keep phasor at 0.91
-			if(variance > 0.1, // If distribution range is large
+			if(variance > 0.1, // If variance range is larger than 0.1
 				{
-				~exec.value; // Execute script for new weights and phasor freq
+				~exec.value; // Execute script for new generation of weights and phasor freq
 			})
 		}
 	)
@@ -67,30 +64,30 @@ s.waitForBoot {
 	(
 	SynthDef(\strings,
 			{ |rmsLP = 4, filFrq =0.1, lim = 3.0, oscMax =0.15, ampSc =4, ampDiffScale =1, dcScale = 1,  cD=0.2, cDecay= 0.2, dynLpf =8000|
-		var locIn = ~syncAmps.kr;
-		var sr = SampleRate.ir;
+		var locIn = ~syncAmps.kr; // Amplitude multiplier for sync algorithm
+		var sr = SampleRate.ir; // SampleRate
 				var anIn = A2K.kr(AnalogIn.ar(~anIns));
-				var ctlSr = ControlRate.ir;
+				var ctlSr = ControlRate.ir; // Samplerate of control signals
 				var anScale = LinLin.kr(anIn.round(0.001), 0, 0.827, -60.0, 0.0).dbamp; // Scaled to dB and then linear amplitude
-				var pickIn= SoundIn.ar([0,1,2,3]) * anScale * ~stringAmps * 10;
-			var sIn = XFade2.ar(pickIn, (pickIn * locIn) * 0.5, A2K.kr(AnalogIn.ar(DC.ar(0))).linlin(0.004, 3.3 / 4.096, -1.0,1.0));
+				var pickIn= SoundIn.ar([0,1,2,3]) * anScale * ~stringAmps * 10; // Incoming string signals multiplied by faders and idividual string-scaling
+			var sIn = XFade2.ar(pickIn, (pickIn * locIn) * 0.5, A2K.kr(AnalogIn.ar(DC.ar(0))).linlin(0.004, 3.3 / 4.096, -1.0,1.0)); // Fade between clean signal and synced signal
 			var sInKr = A2K.kr(pickIn);
 				var freq = Pitch.kr(Mix(sInKr))[0]; // Pitch detector
-				var freqZero = Pitch.kr(sInKr).clip(30, 4000); // Zero crossings (for crude low-CPU individual pitch estimation)
+				var freqZero = ZeroCrossing.kr(sInKr).clip(30, 4000); // Zero crossings (for crude low-CPU individual pitch estimation)
 				var rmsFreq = RMS.kr(freq, 10); // Fast RMS of frequency. Weird but works
 				var rmsFreqSlow = RMS.kr(freq, 0.2); // Slow frequency RMS
 				var freqDiff = RMS.kr(rmsFreq - rmsFreqSlow, 1).abs; // Absolute difference between fast and slow frequency detection
 			var ab = RMS.kr(Mix(pickIn * ampSc), 0.2); // Slow RMS amplitude follower, sum of all inputs
 			var rmsQuick = RMS.kr(Mix(pickIn * ampSc), 10); // Fast RMS amplitude follower
 				var ampDiff = RMS.kr((ab - rmsQuick), 4).abs; // Absolute difference between slow and fast amplitude RMS
-		var a = RMS.kr(pickIn * ampSc, ampDiff.sqrt); // RMS amplitude follower. Amplitude scaled up. Window = Square root of amp difference + 1
-		var aL = RMS.kr(SoundIn.ar([0,1,2,3]), ampDiff.reciprocal);
-	//	var sync = 4.collect({ |i| Phasor.kr(1, (aL[i].sqrt - [aL[(i+1).mod(4)].sqrt * ~weights.kr(1,(i+1).mod(4)), aL[(i-1).mod(4)].sqrt * ~weights.kr(1,(i-1).mod(4))].mean), 0,ctlSr).fold2(ctlSr /4) / (ctlSr /4) * 1.0 + 1.0});
-	var sync = 4.collect({ |i| LFTri.kr((aL[i].sqrt - [aL[(i+1).mod(4)].sqrt * ~weights.kr(1,(i+1).mod(4)), aL[(i-1).mod(4)].sqrt * ~weights.kr(1,(i-1).mod(4))].mean))}).clip(-10.0, 10.0);
-				var b = LPF.ar(pickIn * (Integrator.ar(sIn.abs,0.99 - freqDiff.clip(1,300).reciprocal.linlin(0,1.0, 0.01, 0.8).sqrt).reciprocal), 8000);
+		var a = RMS.kr(pickIn * ampSc, ampDiff.sqrt); // RMS amplitude follower. Amplitude scaled up. Window = Square root of amp difference
+		var aL = RMS.kr(SoundIn.ar([0,1,2,3]), ampDiff.reciprocal); // RMS amplitude follower. Amplitude scaled up. Window = Reciprocal of amp difference
+	//	var sync = 4.collect({ |i| Phasor.kr(1, (aL[i].sqrt - [aL[(i+1).mod(4)].sqrt * ~weights.kr(1,(i+1).mod(4)), aL[(i-1).mod(4)].sqrt * ~weights.kr(1,(i-1).mod(4))].mean), 0,ctlSr).fold2(ctlSr /4) / (ctlSr /4) * 1.0 + 1.0}); Alternative sync algorithm. More 'correct' than the following, but possible also less fun 
+	var sync = 4.collect({ |i| LFTri.kr((aL[i].sqrt - [aL[(i+1).mod(4)].sqrt * ~weights.kr(1,(i+1).mod(4)), aL[(i-1).mod(4)].sqrt * ~weights.kr(1,(i-1).mod(4))].mean))}).clip(-10.0, 10.0); // Sync algorithm as described in paper.
+				var b = LPF.ar(pickIn * (Integrator.ar(sIn.abs,0.99 - freqDiff.clip(1,300).reciprocal.linlin(0,1.0, 0.01, 0.8).sqrt).reciprocal), 8000); // Saturator as described in paper
 				var c = XFade2.ar(pickIn, b, a.linlin(0.0001,0.4, 1.0, -1.0));
 				var d = XFade2.ar(sIn, c, A2K.kr(AnalogIn.ar(DC.ar(1))).round(0.001).linlin(0.0, 0.827, -1.0, 1.0));
-				var comb = LPF.ar(4.collect({ |i|Mix(CombC.ar(d[i], 0.2, (RMS.kr(freqZero[i], 0.1) * [7/4, 9/8, 11/8, 13/8]).reciprocal,ampDiff.sqrt.linlin(0.0, 1, 0.5, -0.5)))} * 0.25), 4000);
+				var comb = LPF.ar(4.collect({ |i|Mix(CombC.ar(d[i], 0.2, (RMS.kr(freqZero[i], 0.1) * [7/4, 9/8, 11/8, 13/8]).reciprocal,ampDiff.sqrt.linlin(0.0, 1, 0.5, -0.5)))} * 0.25), 4000); // Comb filter as described in paper
 				var out = LPF.ar(XFade2.ar(Mix(d), Mix(comb), AnalogIn.ar(2).round(0.001).linlin(0.0, 0.827, -1.0,1.0)), 6000);
 				var locOut = Out.kr(~syncAmps, sync);
 				var phaseImpulse = Impulse.kr(~distRange.kr);
@@ -104,6 +101,8 @@ s.waitForBoot {
 	);
 
 s.sync;
+
+// Sync algoritihm to be executed for each new generation
 
 ~exec = {
 ~trig.set(1); // Trigger phasor to reset
