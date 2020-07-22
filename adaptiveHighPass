@@ -1,0 +1,42 @@
+
+s = Server.default;
+
+s.options.numAnalogInChannels = 8;
+s.options.memSize_(8192*16);
+s.options.maxLogins = 4;
+s.options.headphoneLevel = -6; // sets the headphone level to -6 dB
+s.options.speakerMuted = 0;    // enable the speaker amp
+s.options.numMultiplexChannels = 0; // do not enable multiplexer channels
+s.options.blockSize = 32;
+s.options.numInputBusChannels = 4;
+s.options.numOutputBusChannels = 2;
+
+s.options.postln;
+
+~numIns = 4;
+~anIns = [4,7,5,6];
+~stringAmps = [3,2,1,1];
+
+s.waitForBoot {
+	"Server Booted".postln;
+	(
+	SynthDef(\strings,
+			{ |rmsLP = 4, filFrq =0.1, lim = 3.0, oscMax =0.15, ampSc =4, ampDiffScale =1, dcScale = 1,  cD=0.2, cDecay= 0.2|
+		var sr = SampleRate.ir;
+				var anIn = A2K.kr(AnalogIn.ar(~anIns));
+				var anScale = LinLin.kr(anIn.round(0.001), 0, 0.827, -60.0, 0.0).dbamp; // Scaled to dB and then linear amplitude
+				var pickIn= SoundIn.ar([0,1,2,3]) * anScale * ~stringAmps * 10;
+			var rmsQuick = RMS.kr(SoundIn.ar([0,1,2,3]), 10); // Fast RMS amplitude follower
+			var tri = LFTri.kr(LinLin.kr(rmsQuick, 0, [0.13,0.045, 0.045, 0.045], filFrq, 0).clip(0.0, filFrq),0, 30.0, 70.0).poll; // Triangular wave oscillating between
+				var hpf = HPF.ar(pickIn, tri);
+				var out = LPF.ar(Mix(hpf), 6000);
+				Out.ar(0, Limiter.ar(LeakDC.ar(out)),lim);
+
+		}).send(s)
+	);
+
+
+	s.sync;
+
+	x = Synth(\strings, target:s)
+};
